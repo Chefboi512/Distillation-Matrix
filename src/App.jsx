@@ -117,11 +117,13 @@ function stemVisualFromName(filename = '') {
 // ════════════════════════════════════════════════════════════
 // All requests go through the same-origin proxy. The proxy owns the
 // MVSEP_API_KEY and injects it on the way out.
-async function createSeparation({ file, sepType, outputFormat = 1 }) {
+async function createSeparation({ file, sepType, outputFormat = 0 }) {
+  // output_format: 0 = MP3 320kbps (smaller, friendlier for the 10MB
+  // Cloudflare free-tier body limit). Flip to 1 for 16-bit WAV.
   const form = new FormData();
   form.append('audiofile', file);
   form.append('sep_type', String(sepType));
-  form.append('output_format', String(outputFormat)); // 1 = WAV
+  form.append('output_format', String(outputFormat));
   form.append('is_demo', 'false');
 
   const res = await fetch(`${PROXY_URL}/create`, { method: 'POST', body: form });
@@ -271,11 +273,12 @@ export default function DistillationLab() {
     }
     // Friendly heads-up for large files. Cloudflare Pages free tier
     // caps request bodies at 10 MB; paid at 100 MB. A 3-min WAV is
-    // ~30 MB and will fail on the free plan.
+    // ~30 MB; a 3-min MP3 is ~3-7 MB. Convert WAV→MP3 locally first
+    // if you're on the free plan.
     if (f.size > 10 * 1024 * 1024) {
       setError(
         `File is ${(f.size / 1048576).toFixed(1)} MB. Cloudflare Pages free tier ` +
-        `caps uploads at 10 MB — please compress to MP3 or upgrade the plan.`
+        `caps uploads at 10 MB — please compress to a smaller file or upgrade the plan.`
       );
     } else {
       setError(null);
@@ -857,11 +860,11 @@ export default function DistillationLab() {
                       : <Play className={`w-3.5 h-3.5 ml-0.5 ${isReady ? 'text-zinc-300 group-hover:text-white' : 'text-zinc-600'}`} fill="currentColor" />}
                   </div>
                 </button>
-                <a href={stem.url || '#'} download={stem.name || 'stem.wav'}
+                <a href={stem.url || '#'} download={stem.name || 'stem.mp3'}
                    onClick={(e) => !isReady && e.preventDefault()}
                    className={`text-[9px] font-mono tracking-widest font-bold flex items-center gap-1 drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)] transition-colors
                      ${isReady ? 'text-zinc-400 hover:text-white cursor-pointer' : 'text-zinc-700 cursor-not-allowed'}`}>
-                  <Download className="w-3 h-3" /> .WAV
+                  <Download className="w-3 h-3" /> .MP3
                 </a>
               </div>
             );
