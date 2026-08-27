@@ -129,7 +129,18 @@ async function createSeparation({ file, sepType, outputFormat = 0 }) {
   const res = await fetch(`${PROXY_URL}/create`, { method: 'POST', body: form });
   const text = await res.text();
   let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`Bad response: ${text.slice(0, 120)}`); }
+  try { json = JSON.parse(text); } catch {
+    // Non-JSON body usually means Cloudflare's edge rejected the
+    // request before our function could respond (body too large, etc).
+    if (res.status === 400) {
+      throw new Error(
+        `HTTP 400 from server. The most common cause is the file being ` +
+        `over the 10 MB Cloudflare Pages free-tier body limit. Check the ` +
+        `file size — a 3-min WAV is ~30 MB; a 3-min MP3 at 192 kbps is ~4 MB.`
+      );
+    }
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 120) || '(empty response)'}`);
+  }
   if (!res.ok || json.success === false) {
     throw new Error(json?.data?.message || `HTTP ${res.status}`);
   }
@@ -180,6 +191,7 @@ export default function DistillationLab() {
   const [showSettings, setShowSettings] = useState(false);
   const [pickerOpen, setPickerOpen]   = useState(false);  // local-file browser modal
   const [localFiles, setLocalFiles]   = useState([]);
+  const [tooLarge, setTooLarge]       = useState(false);  // file over the upload body limit
 
   // ── audio playback state ──────────────────────────────────
   const [activePlay, setActivePlay]   = useState(null);   // 'main' | stem.id
@@ -269,18 +281,23 @@ export default function DistillationLab() {
     if (!f) return;
     if (!isAudioFile(f)) {
       setError('Please upload a .wav or .mp3 file.');
+      setTooLarge(false);
       return;
     }
-    // Friendly heads-up for large files. Cloudflare Pages free tier
-    // caps request bodies at 10 MB; paid at 100 MB. A 3-min WAV is
-    // ~30 MB; a 3-min MP3 is ~3-7 MB. Convert WAV→MP3 locally first
-    // if you're on the free plan.
+    // Cloudflare Pages free tier caps request bodies at 10 MB; paid at
+    // 100 MB. A 3-min WAV is ~30 MB and will get a 400 from the
+    // platform before it ever reaches the function. Block the upload
+    // outright so the user gets a clear message instead of a
+    // confusing generic 400.
     if (f.size > 10 * 1024 * 1024) {
+      setTooLarge(true);
       setError(
-        `File is ${(f.size / 1048576).toFixed(1)} MB. Cloudflare Pages free tier ` +
-        `caps uploads at 10 MB — please compress to a smaller file or upgrade the plan.`
+        `File is ${(f.size / 1048576).toFixed(1)} MB — over the 10 MB upload limit ` +
+        `for Cloudflare Pages free tier. Convert to MP3 (192-320 kbps) or trim the ` +
+        `track, then try again. Upgrade to a paid plan to raise the limit to 100 MB.`
       );
     } else {
+      setTooLarge(false);
       setError(null);
     }
     setStems([]);
@@ -308,6 +325,7 @@ export default function DistillationLab() {
 
   const startSeparation = async () => {
     if (!file) return;
+    if (tooLarge) return; // belt-and-suspenders
     try {
       setError(null);
       setStems([]);
@@ -721,11 +739,17 @@ export default function DistillationLab() {
                 </button>
               </>
             )}
-            {file && !isWorking && stage !== 'complete' && (
+            {file && !isWorking && stage !== 'complete' && !tooLarge && (
               <button onClick={startSeparation}
                       className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest px-4 py-1.5 rounded-full bg-gradient-to-b from-purple-500 to-purple-700 border border-purple-300/40 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)] hover:shadow-[0_0_25px_rgba(168,85,247,0.6)] transition-all">
                 <ListMusic className="w-3 h-3" /> Start Distillation
               </button>
+            )}
+            {file && tooLarge && (
+              <a href="https://cloudconvert.com/wav-to-mp3" target="_blank" rel="noopener noreferrer"
+                 className="flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-widest px-3 py-1.5 rounded-full bg-gradient-to-b from-zinc-700 to-zinc-900 border border-zinc-500/40 text-zinc-200 hover:from-zinc-600 hover:to-zinc-800 transition-all">
+                <Download className="w-3 h-3" /> Convert to MP3
+              </a>
             )}
             {isWorking && (
               <button onClick={() => { setStage('error'); setError('Cancelled by user.'); }}
