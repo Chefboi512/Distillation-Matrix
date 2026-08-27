@@ -130,19 +130,17 @@ async function createSeparation({ file, sepType, outputFormat = 0 }) {
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch {
-    // Non-JSON body usually means Cloudflare's edge rejected the
-    // request before our function could respond (body too large, etc).
-    if (res.status === 400) {
-      throw new Error(
-        `HTTP 400 from server. The most common cause is the file being ` +
-        `over the 10 MB Cloudflare Pages free-tier body limit. Check the ` +
-        `file size — a 3-min WAV is ~30 MB; a 3-min MP3 at 192 kbps is ~4 MB.`
-      );
-    }
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 120) || '(empty response)'}`);
+    // Non-JSON body. Show the raw text so we can see what came back.
+    const preview = text.slice(0, 200) || '(empty response)';
+    throw new Error(`HTTP ${res.status} (non-JSON response): ${preview}`);
   }
   if (!res.ok || json.success === false) {
-    throw new Error(json?.data?.message || `HTTP ${res.status}`);
+    // Include the raw response too — MVSEP sometimes returns
+    // success:true with an error message in data, or success:false
+    // with no data.message, in which case we want to see the body.
+    const msg = json?.data?.message || `HTTP ${res.status}`;
+    const raw = !json?.data?.message ? ` | raw: ${text.slice(0, 200)}` : '';
+    throw new Error(`${msg}${raw}`);
   }
   return json.data; // { hash, link }
 }

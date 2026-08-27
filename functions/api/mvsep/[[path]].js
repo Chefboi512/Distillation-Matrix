@@ -1,7 +1,6 @@
 /**
  * Cloudflare Pages Function — MVSEP API proxy
  * ─────────────────────────────────────────────────────────────
- * Mirrors proxy-server.js (dev) but runs in the Cloudflare edge.
  *
  *   POST /api/mvsep/create   → upstream: https://mvsep.com/api/separation/create
  *   GET  /api/mvsep/get?…    → upstream: https://mvsep.com/api/separation/get
@@ -11,10 +10,13 @@
  * Required Cloudflare Pages env var:
  *   MVSEP_API_KEY=…   (get one at https://mvsep.com/)
  *
- * ⚠️  Cloudflare Pages body limits:
- *      - free plan: 10 MB max request body
- *      - paid plan: 100 MB max request body
- *    A 3-min WAV is ~30 MB. If you hit 413, compress to MP3 or upgrade.
+ * For /create we use the proven RE-PARSE approach: parse the
+ * browser's multipart form, re-build a new FormData with the
+ * api_token added, forward to MVSEP. This is what worked in the
+ * first deployment. A later "stream-through" optimization
+ * turned out to be unreliable on Cloudflare Workers.
+ *
+ * Body limits: 100 MB paid / 10 MB free Cloudflare Pages plan.
  */
 
 const MVSEP_BASE = 'https://mvsep.com/api/separation';
@@ -34,24 +36,18 @@ const json = (body, status = 200) =>
 export const onRequestOptions = () =>
   new Response(null, { status: 204, headers: CORS });
 
-// Catch-all POST — routes by `params.path[0]`
 export const onRequestPost = async ({ request, env, params }) => {
   const sub = (params.path || [])[0];
-
   if (sub === 'create') return handleCreate(request, env);
   if (sub === 'test')   return handleTest(env);
-
   return json({ success: false, data: { message: `Unknown POST /${sub || ''}` } }, 404);
 };
 
-// Catch-all GET — routes by `params.path[0]`
 export const onRequestGet = async ({ request, env, params }) => {
   const sub = (params.path || [])[0];
-
   if (sub === 'get')   return handleGet(request);
   if (sub === 'audio') return handleAudio(request);
   if (sub === 'test')  return handleTest(env);
-
   return json({ success: false, data: { message: `Unknown GET /${sub || ''}` } }, 404);
 };
 
@@ -69,9 +65,7 @@ async function handleCreate(request, env) {
     }, 500);
   }
 
-  // Pre-flight body size check using Content-Length header.
-  // Catches files that exceed the platform limit before we waste CPU
-  // parsing them.
+  // Pre-flight body size check
   const contentLength = parseInt(request.headers.get('content-length') || '0', 10);
   if (contentLength > 100 * 1024 * 1024) {
     return json({
@@ -80,28 +74,20 @@ async function handleCreate(request, env) {
     }, 413);
   }
 
-  // Parse the multipart form
+  // Parse the multipart body
   let form;
   try {
     form = await request.formData();
   } catch (e) {
-    console.error('[create] formData parse failed:', e?.message);
     return json({
       success: false,
-      data: {
-        message:
-          `Could not parse multipart form: ${e?.message || e}. ` +
-          'The file may be too large for the Cloudflare Pages body limit ' +
-          '(10 MB free / 100 MB paid) — try compressing to MP3 first.',
-      },
+      data: { message: `Could not parse multipart form: ${e?.message || e}. File may exceed the Cloudflare Pages body limit.` },
     }, 400);
   }
 
-  const fields = Array.from(form.keys());
-  console.log('[create] received form fields:', fields, 'content-length:', contentLength);
-
   const file = form.get('audiofile');
   if (!file) {
+    const fields = Array.from(form.keys());
     return json({
       success: false,
       data: { message: `audiofile field missing. Got fields: [${fields.join(', ')}]` },
@@ -110,21 +96,13 @@ async function handleCreate(request, env) {
   if (typeof file === 'string') {
     return json({
       success: false,
-      data: { message: 'audiofile was sent as text, not a file. The browser should be appending a File object from the file input.' },
+      data: { message: 'audiofile was sent as text, not a file. Browser should be appending a File object.' },
     }, 400);
   }
 
-  // Post-parse size check (Content-Length can lie; .size is authoritative)
-  if (file.size > 100 * 1024 * 1024) {
-    return json({
-      success: false,
-      data: { message: `File too large: ${(file.size / 1048576).toFixed(1)} MB. Max 100 MB on paid, 10 MB on free Cloudflare Pages.` },
-    }, 413);
-  }
+  console.log('[create] file:', file.name, file.type || '(no type)', `${(file.size / 1024).toFixed(1)} KB`);
 
-  console.log('[create] file ok:', file.name, file.type || '(no type)', `${(file.size / 1048576).toFixed(2)} MB`);
-
-  // Rebuild the multipart body with the api_token injected
+  // Re-build FormData with api_token injected
   const fd = new FormData();
   fd.append('api_token',     key);
   fd.append('sep_type',      String(form.get('sep_type')      || '20'));
@@ -137,21 +115,25 @@ async function handleCreate(request, env) {
   fd.append('audiofile', file, file.name || 'audio');
 
   // Forward to MVSEP
+  let upstream;
   try {
-    const upstream = await fetch(`${MVSEP_BASE}/create`, { method: 'POST', body: fd });
-    const text = await upstream.text();
-    console.log('[create] MVSEP response:', upstream.status, text.slice(0, 200));
-    return new Response(text, {
-      status: upstream.status,
-      headers: { ...CORS, 'Content-Type': 'application/json' },
-    });
+    upstream = await fetch(`${MVSEP_BASE}/create`, { method: 'POST', body: fd });
   } catch (e) {
-    console.error('[create] upstream fetch failed:', e?.message);
     return json({
       success: false,
       data: { message: `Could not reach MVSEP: ${e?.message || e}` },
     }, 502);
   }
+
+  const text = await upstream.text();
+  console.log('[create] MVSEP response:', upstream.status, text.slice(0, 300));
+
+  // Pass through MVSEP's response as-is. If it's a 4xx, MVSEP's body
+  // usually has { success: false, data: { message: "..." } }.
+  return new Response(text, {
+    status: upstream.status,
+    headers: { ...CORS, 'Content-Type': 'application/json' },
+  });
 }
 
 // ── GET /api/mvsep/get?hash=… ────────────────────────────────
@@ -184,7 +166,6 @@ async function handleAudio(request) {
     if (!upstream.ok) {
       return json({ success: false, data: { message: `upstream ${upstream.status}` } }, upstream.status);
     }
-    // Buffer whole body — a few MB is fine, and dodges Workers stream quirks
     const body = await upstream.arrayBuffer();
     const headers = new Headers(CORS);
     const ct = upstream.headers.get('content-type') || 'application/octet-stream';
@@ -199,8 +180,6 @@ async function handleAudio(request) {
 }
 
 // ── GET|POST /api/mvsep/test ─────────────────────────────────
-// No upstream call. Confirms the function is reachable and the
-// MVSEP_API_KEY env var is set (without revealing the key).
 async function handleTest(env) {
   return json({
     success: true,
@@ -208,6 +187,7 @@ async function handleTest(env) {
       message: 'MVSEP proxy reachable',
       hasApiKey: !!env.MVSEP_API_KEY,
       keyLength: env.MVSEP_API_KEY?.length || 0,
+      keyPrefix: env.MVSEP_API_KEY?.slice(0, 4) + '…',
       timestamp: new Date().toISOString(),
     },
   });

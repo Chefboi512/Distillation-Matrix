@@ -6,9 +6,11 @@
  *   POST /api/mvsep/create   → https://mvsep.com/api/separation/create
  *   GET  /api/mvsep/get?…    → https://mvsep.com/api/separation/get
  *   GET  /api/mvsep/audio?url=…  → streams MVSEP file with CORS headers
+ *   GET  /api/mvsep/test     → health/debug
  *
- * In production this same surface is served by the Cloudflare Pages
- * Function in `functions/api/mvsep/[[path]].js`. Same URL shape.
+ * In production the same surface is served by the Cloudflare Pages
+ * Function in `functions/api/mvsep/[[path]].js`. Both use the
+ * re-parse FormData approach (proven to work in production).
  *
  * Required env:
  *   MVSEP_API_KEY=…   (get one at https://mvsep.com/)
@@ -30,24 +32,40 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
 
 // CORS
-const cors = (req, res, next) => {
+app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
   res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Disposition');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
-};
-app.use(cors);
+});
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'mvsep-proxy' }));
 
-// ── POST /api/mvsep/create ────────────────────────────────────
+// ── GET|POST /api/mvsep/test ─────────────────────────────────
+function testHandler(_req, res) {
+  res.json({
+    success: true,
+    data: {
+      message: 'MVSEP proxy reachable',
+      hasApiKey: !!MVSEP_API_KEY,
+      keyLength: MVSEP_API_KEY.length,
+      keyPrefix: MVSEP_API_KEY.slice(0, 4) + '…',
+      timestamp: new Date().toISOString(),
+    },
+  });
+}
+app.get('/api/mvsep/test', testHandler);
+app.post('/api/mvsep/test', testHandler);
+
+// ── POST /api/mvsep/create (re-parse approach) ──────────────
 app.post('/api/mvsep/create', upload.single('audiofile'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, data: { message: 'audiofile missing' } });
     }
+
     const fd = new FormData();
     fd.append('api_token',     MVSEP_API_KEY);
     fd.append('sep_type',      req.body.sep_type      || '20');
@@ -82,8 +100,6 @@ app.get('/api/mvsep/get', async (req, res) => {
 });
 
 // ── GET /api/mvsep/audio?url=…&name=… ────────────────────────
-// Streams a remote MVSEP file with permissive CORS so the Web Audio
-// analyser (createMediaElementSource) can read frequency data.
 app.get('/api/mvsep/audio', async (req, res) => {
   try {
     const url = req.query.url;
@@ -91,21 +107,15 @@ app.get('/api/mvsep/audio', async (req, res) => {
     if (!url) return res.status(400).json({ success: false, data: { message: 'url missing' } });
     if (!/^https?:\/\//i.test(url)) return res.status(400).json({ success: false, data: { message: 'url must be http(s)' } });
 
-    const upstream = await fetch(url);
-    if (!upstream.ok) {
-      return res.status(upstream.status).json({ success: false, data: { message: `upstream ${upstream.status}` } });
-    }
+    const upstream = await fetch(url, { redirect: 'follow' });
+    if (!upstream.ok) return res.status(upstream.status).json({ success: false, data: { message: `upstream ${upstream.status}` } });
 
     const ct = upstream.headers.get('content-type') || 'application/octet-stream';
     res.setHeader('Content-Type', ct);
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    if (upstream.headers.get('content-length')) {
-      res.setHeader('Content-Length', upstream.headers.get('content-length'));
-    }
-    if (name) {
-      res.setHeader('Content-Disposition', `attachment; filename="${String(name).replace(/"/g, '')}"`);
-    }
-    // stream the body
+    if (upstream.headers.get('content-length')) res.setHeader('Content-Length', upstream.headers.get('content-length'));
+    if (name) res.setHeader('Content-Disposition', `attachment; filename="${String(name).replace(/"/g, '')}"`);
+
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.end(buf);
   } catch (e) {
@@ -118,5 +128,6 @@ app.listen(PORT, () => {
   console.log(`\n  ⏣  MVSEP proxy listening on http://localhost:${PORT}`);
   console.log(`     POST  /api/mvsep/create`);
   console.log(`     GET   /api/mvsep/get?hash=…`);
-  console.log(`     GET   /api/mvsep/audio?url=…&name=…\n`);
+  console.log(`     GET   /api/mvsep/audio?url=…&name=…`);
+  console.log(`     GET   /api/mvsep/test\n`);
 });
