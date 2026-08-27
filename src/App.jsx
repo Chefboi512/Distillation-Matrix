@@ -135,12 +135,16 @@ async function createSeparation({ file, sepType, outputFormat = 0 }) {
     throw new Error(`HTTP ${res.status} (non-JSON response): ${preview}`);
   }
   if (!res.ok || json.success === false) {
-    // Include the raw response too — MVSEP sometimes returns
-    // success:true with an error message in data, or success:false
-    // with no data.message, in which case we want to see the body.
-    const msg = json?.data?.message || `HTTP ${res.status}`;
-    const raw = !json?.data?.message ? ` | raw: ${text.slice(0, 200)}` : '';
-    throw new Error(`${msg}${raw}`);
+    // MVSEP returns errors in THREE different shapes depending on the
+    // failure: { data: { message } }, { errors: [...] }, or { message }.
+    // Try them all so the user always sees a real message.
+    const candidates = [
+      json?.data?.message,
+      Array.isArray(json?.errors) ? json.errors.join(' · ') : null,
+      json?.message,
+    ].filter(Boolean);
+    const msg = candidates[0] || `HTTP ${res.status} (no message in response)`;
+    throw new Error(msg);
   }
   return json.data; // { hash, link }
 }
@@ -228,13 +232,21 @@ export default function DistillationLab() {
       try {
         const r = await pollSeparation(jobInfo.hash);
         if (cancelled) return;
+        // MVSEP uses different shapes for errors — try them all.
+        const extractMsg = (obj) => {
+          if (!obj) return null;
+          return obj?.data?.message
+              || (Array.isArray(obj?.errors) ? obj.errors.join(' · ') : null)
+              || obj?.message
+              || null;
+        };
         if (r.success === false) {
-          throw new Error(r?.data?.message || 'Job not found');
+          throw new Error(extractMsg(r) || 'Job not found');
         }
         const status = r.status;
         if (status === 'done') {
           setStage('complete');
-          setJobInfo(prev => ({ ...prev, message: r.data?.message || 'Done' }));
+          setJobInfo(prev => ({ ...prev, message: extractMsg(r) || 'Done' }));
           // Normalise files — API returns array of { url, ... } or object map
           const rawFiles = Array.isArray(r.data?.files) ? r.data.files
                           : (r.data?.files && typeof r.data.files === 'object') ? Object.values(r.data.files)
@@ -250,7 +262,7 @@ export default function DistillationLab() {
           if (built.length === 0) throw new Error('Job finished but no stem files returned');
           setStems(built);
         } else if (status === 'failed') {
-          throw new Error(r.data?.message || 'Job failed on MVSEP side');
+          throw new Error(extractMsg(r) || 'Job failed on MVSEP side');
         } else {
           setStage(status); // waiting | processing | distributing | merging
           setJobInfo(prev => ({
@@ -332,7 +344,15 @@ export default function DistillationLab() {
       setJobInfo({ hash: data.hash, link: data.link, message: 'Queued' });
       setStage('queued');
     } catch (e) {
-      setError(e.message);
+      // MVSEP returns "You already have unprocessed file in queue"
+      // when there's a leftover job from a previous attempt. Make
+      // that message friendlier so the user knows what to do.
+      const raw = e.message || '';
+      const friendly = /already have.*queue/i.test(raw)
+        ? `${raw} — wait for it to finish on MVSEP's side, then try again. ` +
+          `You can also check https://mvsep.com/ to see your queue.`
+        : raw;
+      setError(friendly);
       setStage('error');
     }
   };
