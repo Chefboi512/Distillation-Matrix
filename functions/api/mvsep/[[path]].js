@@ -108,10 +108,12 @@ export const onRequestGet = async ({ request, env, params }) => {
       const headers = new Headers(CORS);
       const ct = upstream.headers.get('content-type') || 'application/octet-stream';
       headers.set('Content-Type', ct);
-      headers.set('Accept-Ranges', 'bytes');
       const cl = upstream.headers.get('content-length');
       if (cl) headers.set('Content-Length', cl);
       if (name) headers.set('Content-Disposition', `attachment; filename="${String(name).replace(/"/g, '')}"`);
+      // NB: we don't advertise Accept-Ranges because we don't implement
+      // partial responses. Advertising it causes browsers to issue range
+      // requests, which would fail.
       return new Response(upstream.body, { status: 200, headers });
     } catch (e) {
       return json({ success: false, data: { message: e.message } }, 500);

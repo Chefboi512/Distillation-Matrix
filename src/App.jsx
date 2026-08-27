@@ -331,18 +331,24 @@ export default function DistillationLab() {
   // ════════════════════════════════════════════════════════════
   const initAudioEngine = (audioEl) => {
     if (!audioEl) return null;
-    if (!audioCtxRef.current) {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      const ctx = new Ctx();
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.85;
+
+    // (Re)create the audio context if missing OR closed
+    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+      const Ctx  = window.AudioContext || window.webkitAudioContext;
+      const ctx  = new Ctx();
+      const an   = ctx.createAnalyser();
+      an.fftSize = 1024;
+      an.smoothingTimeConstant = 0.85;
       audioCtxRef.current = ctx;
-      analyserRef.current = analyser;
+      analyserRef.current   = an;
+      sourceRef.current     = new Map();   // reset — old sources belong to a dead ctx
     }
-    if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
-    // create / reuse source for THIS audio element
-    const sources = sourceRef.current || (sourceRef.current = new Map());
+    if (audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume().catch(() => {});
+    }
+
+    // createMediaElementSource is one-shot per element. Track them.
+    const sources = sourceRef.current;
     if (!sources.has(audioEl)) {
       try {
         const s = audioCtxRef.current.createMediaElementSource(audioEl);
@@ -350,11 +356,32 @@ export default function DistillationLab() {
         analyserRef.current.connect(audioCtxRef.current.destination);
         sources.set(audioEl, s);
       } catch (e) {
-        // already wired by another source — ignore
+        // already wired on a different ctx — ignore
+        console.warn('[audio] source already exists for element', e);
       }
     }
     return audioCtxRef.current;
   };
+
+  // Wait until the audio element has enough buffered data to play.
+  // Resolves immediately if already ready, rejects on error or timeout.
+  const waitForAudioReady = (audioEl, timeoutMs = 10000) => new Promise((resolve, reject) => {
+    if (!audioEl) return reject(new Error('no audio element'));
+    if (audioEl.readyState >= 3 /* HAVE_FUTURE_DATA */) return resolve();
+    const onReady = () => { cleanup(); resolve(); };
+    const onErr   = () => { cleanup(); reject(new Error('audio load failed')); };
+    const cleanup = () => {
+      audioEl.removeEventListener('canplaythrough', onReady);
+      audioEl.removeEventListener('canplay', onReady);
+      audioEl.removeEventListener('error', onErr);
+      clearTimeout(timer);
+    };
+    audioEl.addEventListener('canplaythrough', onReady, { once: true });
+    audioEl.addEventListener('canplay',        onReady, { once: true });
+    audioEl.addEventListener('error',          onErr,   { once: true });
+    const timer = setTimeout(() => { cleanup(); resolve(); }, timeoutMs);
+    try { audioEl.load(); } catch {} // kick off the fetch
+  });
 
   const updateVisualizer = useCallback(() => {
     if (!analyserRef.current || !activePlayRef.current) return;
@@ -391,30 +418,61 @@ export default function DistillationLab() {
     setVolumes({});
   };
 
-  const togglePlay = (target) => {
-    // target is 'main' or a stem object
-    const isStem = typeof target === 'object';
-    const targetId = isStem ? target.visual.id : 'main';
-    const audioEl = isStem ? stemAudioRefs.current[target.url] : audioRef.current;
+  const togglePlay = async (target) => {
+    // target is 'main' (string) or a stem object
+    const isStem  = typeof target === 'object';
+    // use a stable id we can both write and read — the audio element ref
+    const targetKey = isStem ? target.url : 'main';
+    const audioEl   = isStem ? stemAudioRefs.current[target.url] : audioRef.current;
     if (!audioEl) return;
 
-    if (activePlay === targetId || (isStem && activePlay === target.url)) {
-      // pause
+    // Already playing this one → pause
+    if (activePlay === targetKey) {
       audioEl.pause();
       setActivePlay(null);
       stopVisualizer();
       return;
     }
-    // stop any other playback first
-    if (audioRef.current && !isStem) audioRef.current.pause();
-    Object.entries(stemAudioRefs.current).forEach(([k, el]) => { if (el && el !== audioEl) { el.pause(); el.currentTime = 0; } });
 
+    // Stop everything else (but NOT the target element)
+    const stopList = [];
+    if (audioRef.current && audioRef.current !== audioEl) stopList.push(audioRef.current);
+    Object.values(stemAudioRefs.current).forEach((el) => {
+      if (el && el !== audioEl) stopList.push(el);
+    });
+    stopList.forEach(el => { el.pause(); el.currentTime = 0; });
+
+    // Wire up the Web Audio graph (idempotent)
     initAudioEngine(audioEl);
-    audioEl.currentTime = 0;
-    audioEl.play().catch(err => setError(`Playback failed: ${err.message}`));
-    setActivePlay(isStem ? target.url : 'main');
-    if (animationRef.current) cancelAnimationFrame(animationRef.current);
-    animationRef.current = requestAnimationFrame(updateVisualizer);
+
+    setActivePlay(targetKey);
+
+    try {
+      await waitForAudioReady(audioEl);
+      audioEl.currentTime = 0;
+      await audioEl.play();
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      animationRef.current = requestAnimationFrame(updateVisualizer);
+    } catch (err) {
+      // Benign interruption errors from rapid clicking / re-renders.
+      // Chrome throws these when play() is called and the element is
+      // already playing or just paused. Don't surface them to the UI.
+      const name = err?.name || '';
+      const msg  = (err?.message || '').toLowerCase();
+      if (
+        name === 'AbortError' ||
+        msg.includes('interrupted') ||
+        msg.includes('absorbed') ||
+        msg.includes('removed from the document') ||
+        msg.includes('not allowed')
+      ) {
+        console.warn('[playback] suppressed benign error:', err.message);
+        return;
+      }
+      setError(`Playback failed: ${err.message || name}`);
+      setActivePlay(null);
+      stopVisualizer();
+    }
   };
 
   // ════════════════════════════════════════════════════════════
