@@ -24,14 +24,20 @@ import {
 // ════════════════════════════════════════════════════════════
 //  CONFIG
 // ════════════════════════════════════════════════════════════
-// Read the API key from Vite env. In dev create a `.env` file with
-//   VITE_MVSEP_KEY=your_key_here
-// The literal below is a fallback so the demo still works out of the
-// box, but for any deploy you should set the env var.
-const MVSEP_API_KEY = import.meta.env.VITE_MVSEP_KEY
-                   || 'HQS2mjwQ4sqIz1evE2nVyQQDge0GpZ';
-const USE_PROXY     = true;                    // ← flip when proxy is running
-const PROXY_URL     = 'http://localhost:8787/mvsep';
+// The MVSEP API key is held server-side — never in this bundle.
+// The proxy (Express in dev, Cloudflare Pages Function in prod)
+// lives at /api/mvsep. Same-origin, no CORS, no exposed key.
+const PROXY_URL = '/api/mvsep';
+
+// Convert an absolute MVSEP file URL into one that goes through the
+// proxy. The proxy streams the file with permissive CORS headers
+// so the Web Audio analyser (createMediaElementSource) can read it.
+const proxyFile = (absUrl) => {
+  if (!absUrl) return absUrl;
+  // already relative? leave it alone
+  if (absUrl.startsWith('/')) return absUrl;
+  return `${PROXY_URL}/audio?url=${encodeURIComponent(absUrl)}`;
+};
 
 // ════════════════════════════════════════════════════════════
 //  SEPARATION MODELS (curated from the MVSEP catalogue)
@@ -109,17 +115,16 @@ function stemVisualFromName(filename = '') {
 // ════════════════════════════════════════════════════════════
 //  API HELPERS
 // ════════════════════════════════════════════════════════════
-const apiBase = () => (USE_PROXY ? PROXY_URL : 'https://mvsep.com/api/separation');
-
+// All requests go through the same-origin proxy. The proxy owns the
+// MVSEP_API_KEY and injects it on the way out.
 async function createSeparation({ file, sepType, outputFormat = 1 }) {
   const form = new FormData();
-  form.append('api_token', MVSEP_API_KEY);
   form.append('audiofile', file);
   form.append('sep_type', String(sepType));
   form.append('output_format', String(outputFormat)); // 1 = WAV
   form.append('is_demo', 'false');
 
-  const res = await fetch(`${apiBase()}/create`, { method: 'POST', body: form });
+  const res = await fetch(`${PROXY_URL}/create`, { method: 'POST', body: form });
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch { throw new Error(`Bad response: ${text.slice(0, 120)}`); }
@@ -130,7 +135,7 @@ async function createSeparation({ file, sepType, outputFormat = 1 }) {
 }
 
 async function pollSeparation(hash) {
-  const res = await fetch(`${apiBase()}/get?hash=${encodeURIComponent(hash)}`);
+  const res = await fetch(`${PROXY_URL}/get?hash=${encodeURIComponent(hash)}`);
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch { throw new Error(`Bad response: ${text.slice(0, 120)}`); }
@@ -225,9 +230,10 @@ export default function DistillationLab() {
           const built = rawFiles
             .filter(f => f && (f.url || f.link || f.download_url))
             .map(f => {
-              const url = f.url || f.link || f.download_url;
-              const fname = f.filename || f.name || url.split('/').pop() || 'stem';
-              return { name: fname, url, visual: stemVisualFromName(fname) };
+              const absUrl = f.url || f.link || f.download_url;
+              const fname  = f.filename || f.name || absUrl.split('/').pop() || 'stem';
+              // Route through the proxy so CORS / Web Audio works
+              return { name: fname, url: proxyFile(absUrl), visual: stemVisualFromName(fname) };
             });
           if (built.length === 0) throw new Error('Job finished but no stem files returned');
           setStems(built);

@@ -6,7 +6,7 @@
 
 Drop a `.wav` or `.mp3` → pick a model → watch the tubes fill → preview & download every stem as WAV.
 
-[Features](#-features) · [Quick start](#-quick-start) · [How it works](#-how-it-works) · [Models](#-models) · [License](#-license)
+[Features](#-features) · [Quick start](#-quick-start) · [Cloudflare Pages deploy](#-cloudflare-pages-deploy) · [How it works](#-how-it-works) · [Models](#-models) · [License](#-license)
 
 </div>
 
@@ -20,52 +20,86 @@ Drop a `.wav` or `.mp3` → pick a model → watch the tubes fill → preview & 
 - 📂 **Local file browser** — drop a single file, or pick a folder and the app filters it to proper `audio/wav` / `audio/mpeg` MIME so you only see `.wav` and `.mp3`.
 - ⬇️ **One-click WAV download** for every stem (16-bit uncompressed).
 - 🔁 **Live job tracking** — `queued (#N, M ahead) → processing → distributing → merging → done`, with a cancel button.
-- 🛡️ **Built-in CORS proxy** — MVSEP doesn't ship CORS headers, so a tiny Express proxy is included and `npm run dev` runs both the proxy and the Vite dev server together.
+- ☁️ **Cloudflare Pages ready** — same-origin proxy via Pages Functions holds the MVSEP API key. No exposed secrets, no CORS, no third-party proxy.
 
-## 🚀 Quick start
+## 🚀 Quick start (local dev)
 
 ```bash
-# 1. Clone & install
-git clone https://github.com/<you>/distillation-matrix.git
-cd distillation-matrix
+git clone https://github.com/Chefboi512/Distillation-Matrix.git
+cd Distillation-Matrix
 npm install
-
-# 2. (Optional) set your MVSEP API key
 cp .env.example .env
-# → edit .env and paste your key from https://mvsep.com/
-
-# 3. Run dev (Vite + proxy, side by side)
+# → edit .env and set MVSEP_API_KEY
 npm run dev
 ```
 
-Then open http://localhost:5173 — drop an audio file, pick a model, hit **Start Distillation**.
+Then open http://localhost:5173.
 
-### Production build
+- The Vite dev server (`5173`) serves the React app and **proxies** `/api/mvsep/*` to…
+- …the Express dev proxy (`8787`) which holds the MVSEP key from `process.env.MVSEP_API_KEY`.
+- Both run in one terminal via `concurrently`.
 
-```bash
-npm run build       # bundles src/ into dist/
-npm run preview     # serve the built bundle locally
-```
+## ☁️ Cloudflare Pages deploy
 
-The proxy (`proxy-server.js`) is for local dev only. For production, set up your own server-side route to MVSEP and ship the key as an env var (never commit it).
+1. **Push to GitHub** (already done if you cloned this repo).
+2. Go to https://dash.cloudflare.com → **Pages** → **Create a project** → **Connect to Git** → pick `Chefboi512/Distillation-Matrix`.
+3. Use the auto-detected settings, or set:
+   - **Build command:** `npm run build`
+   - **Build output directory:** `dist`
+   - **Root directory:** *(leave blank)*
+4. **Add the environment variable** (CRITICAL — this is the API key):
+   - **Pages** → your project → **Settings** → **Environment variables**
+   - Add `MVSEP_API_KEY` = your key (mark as **encrypted**)
+   - Apply to **Production** (and optionally **Preview**)
+5. Click **Save and Deploy**. Cloudflare will:
+   - Run `npm run build`
+   - Deploy the `dist/` static bundle
+   - Deploy `functions/api/mvsep/[[path]].js` as a Pages Function
+6. Your site is live at `https://<project-name>.pages.dev`. Drop a file, pick a model, get stems.
+
+> **Free tier limits:** Cloudflare Workers on the free plan cap request bodies at **10 MB** (100 MB on paid). A 3-5 min song at 320 kbps MP3 is well under that. WAV files are bigger — bump to paid if you need >10 min WAVs.
 
 ## 🧩 How it works
 
 ```
-┌──────────────┐  multipart POST   ┌──────────────┐  POST /create  ┌────────┐
-│  React UI    │ ────────────────► │  Local proxy │ ─────────────► │ MVSEP  │
-│  (Vite)      │                   │  (Express)   │ ◄──── {hash} ── │  API   │
-│              │                   └──────┬───────┘                 └────┬───┘
-│              │ ◄───── JSON ─────────────┘                             │
-│              │   every 5s: GET /get?hash=… ─────────────────────────► │
-│              │ ◄─── {status: processing|done|…, files:[…]} ───────────┘
-└──────────────┘
+                        SAME ORIGIN (your-pages.dev)
+   ┌──────────────────┐    POST /api/mvsep/create    ┌──────────────────┐
+   │   React UI       │  ─────────────────────────► │ Cloudflare       │
+   │  (Vite / dist)   │                             │ Pages Function   │
+   │                  │  ◄─── {hash, link} ───────── │                  │
+   │                  │  GET  /api/mvsep/get?hash=…  │   owns           │
+   │                  │  ─────────────────────────► │   MVSEP_API_KEY  │
+   │                  │  ◄─── {status, files:[…]} ── │                  │
+   │   <audio>        │  GET  /api/mvsep/audio?url=… │  adds CORS so    │
+   │   element        │  ─────────────────────────► │  Web Audio API   │
+   │                  │  ◄─── stream with CORS ───── │  can read stems  │
+   └──────────────────┘                             └────────┬─────────┘
+                                                              │
+                                              POST / GET     │
+                                                              ▼
+                                                    ┌──────────────────┐
+                                                    │  MVSEP API       │
+                                                    │  mvsep.com       │
+                                                    └──────────────────┘
 ```
 
-- `src/App.jsx` — the entire UI / state machine / Web Audio engine
-- `proxy-server.js` — the CORS-busting proxy
-- `vite.config.js`, `tailwind.config.js` — build / styling config
-- `index.html` — Vite entry
+**Why the `/api/mvsep/audio` hop?** MVSEP's storage URLs don't send CORS headers, so the browser's Web Audio analyser (`createMediaElementSource`) would refuse to read frequency data from a cross-origin audio element. The Pages Function streams the file with permissive CORS headers — same-origin, no cross-origin taint.
+
+## 🗂 Project layout
+
+```
+src/
+  App.jsx                 the entire UI / state machine / Web Audio engine
+  main.jsx                React 18 root
+  index.css               Tailwind directives
+functions/
+  api/mvsep/[[path]].js   Cloudflare Pages Function (create / get / audio)
+proxy-server.js           Express dev proxy (mirror of the Pages Function)
+index.html                Vite entry
+vite.config.js            dev server + /api/mvsep → :8787 proxy
+tailwind.config.js
+postcss.config.js
+```
 
 ## 🎛️ Models
 
@@ -81,20 +115,25 @@ The proxy (`proxy-server.js`) is for local dev only. For production, set up your
 
 Full MVSEP catalogue: https://mvsep.com/ — the model IDs in `src/App.jsx` map 1:1.
 
-## 🔐 Environment
+## 🔐 Environment variables
 
-| Variable          | Required | Where                                |
-|-------------------|----------|--------------------------------------|
-| `VITE_MVSEP_KEY`  | yes      | `.env` (see `.env.example`)          |
-| `PORT` (proxy)    | no       | defaults to `8787` in `proxy-server.js` |
+| Variable          | Where set                  | Used by                              |
+|-------------------|----------------------------|--------------------------------------|
+| `MVSEP_API_KEY`   | Cloudflare Pages dashboard | `functions/api/mvsep/[[path]].js`    |
+| `MVSEP_API_KEY`   | `.env` (local dev only)    | `proxy-server.js`                    |
+
+**Never commit your key.** The `.gitignore` already excludes `.env` and `.env.*`.
+
+> If you've previously shipped a build that contained the key in source, **rotate the key** at https://mvsep.com/ before deploying this version.
 
 ## 📦 Tech
 
 - **React 18** + **Vite 5** + **Tailwind 3**
 - **lucide-react** for icons
 - **Web Audio API** (AnalyserNode + MediaElementSource) for the live spectrum
-- **Express + Multer** for the dev proxy
-- No backend database, no auth, no telemetry — your audio never leaves the page beyond the MVSEP upload.
+- **Cloudflare Pages Functions** for the prod proxy (V8 isolates, free tier eligible)
+- **Express + Multer** for the local dev proxy
+- No backend database, no auth, no telemetry — audio only flows between the browser and MVSEP.
 
 ## 🤝 Contributing
 
