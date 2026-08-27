@@ -269,7 +269,17 @@ export default function DistillationLab() {
       setError('Please upload a .wav or .mp3 file.');
       return;
     }
-    setError(null);
+    // Friendly heads-up for large files. Cloudflare Pages free tier
+    // caps request bodies at 10 MB; paid at 100 MB. A 3-min WAV is
+    // ~30 MB and will fail on the free plan.
+    if (f.size > 10 * 1024 * 1024) {
+      setError(
+        `File is ${(f.size / 1048576).toFixed(1)} MB. Cloudflare Pages free tier ` +
+        `caps uploads at 10 MB — please compress to MP3 or upgrade the plan.`
+      );
+    } else {
+      setError(null);
+    }
     setStems([]);
     setJobInfo(null);
     setStage('idle');
