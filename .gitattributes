@@ -1,0 +1,7 @@
+# Force LF line endings for everything so the diffs stay clean
+# regardless of which OS the contributor is on.
+* text=auto eol=lf
+
+# Markdown should keep their trailing newline
+*.md   text eol=lf
+*.mdx  text eol=lf
