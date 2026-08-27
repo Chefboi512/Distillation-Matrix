@@ -98,6 +98,7 @@ app.get('/api/mvsep/audio', async (req, res) => {
 
     const ct = upstream.headers.get('content-type') || 'application/octet-stream';
     res.setHeader('Content-Type', ct);
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     if (upstream.headers.get('content-length')) {
       res.setHeader('Content-Length', upstream.headers.get('content-length'));
     }

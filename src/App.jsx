@@ -328,59 +328,72 @@ export default function DistillationLab() {
 
   // ════════════════════════════════════════════════════════════
   //  WEB AUDIO ENGINE
+  //  The spectrum visualiser is a nice-to-have on top of basic
+  //  playback. createMediaElementSource is fragile (one-shot per
+  //  element, context state-sensitive, NotSupportedError on CORS
+  //  conflicts). We make it best-effort: if it fails, playback
+  //  still works, the visualiser just stays flat.
   // ════════════════════════════════════════════════════════════
   const initAudioEngine = (audioEl) => {
     if (!audioEl) return null;
 
-    // (Re)create the audio context if missing OR closed
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
-      const Ctx  = window.AudioContext || window.webkitAudioContext;
-      const ctx  = new Ctx();
-      const an   = ctx.createAnalyser();
-      an.fftSize = 1024;
-      an.smoothingTimeConstant = 0.85;
-      audioCtxRef.current = ctx;
-      analyserRef.current   = an;
-      sourceRef.current     = new Map();   // reset — old sources belong to a dead ctx
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new Ctx();
+        const an  = ctx.createAnalyser();
+        an.fftSize = 1024;
+        an.smoothingTimeConstant = 0.85;
+        audioCtxRef.current = ctx;
+        analyserRef.current   = an;
+        sourceRef.current     = new Map();
+      } catch (e) {
+        console.warn('[audio] could not create AudioContext', e);
+        return null;
+      }
     }
     if (audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume().catch(() => {});
     }
 
-    // createMediaElementSource is one-shot per element. Track them.
+    // Attach a MediaElementSource to drive the visualiser.
+    // Skip silently if it fails for any reason — playback still works.
     const sources = sourceRef.current;
-    if (!sources.has(audioEl)) {
+    if (sources && !sources.has(audioEl)) {
       try {
         const s = audioCtxRef.current.createMediaElementSource(audioEl);
         s.connect(analyserRef.current);
         analyserRef.current.connect(audioCtxRef.current.destination);
         sources.set(audioEl, s);
       } catch (e) {
-        // already wired on a different ctx — ignore
-        console.warn('[audio] source already exists for element', e);
+        console.warn('[audio] could not wire visualiser (playback will still work):', e?.message);
       }
     }
     return audioCtxRef.current;
   };
 
   // Wait until the audio element has enough buffered data to play.
-  // Resolves immediately if already ready, rejects on error or timeout.
-  const waitForAudioReady = (audioEl, timeoutMs = 10000) => new Promise((resolve, reject) => {
+  // Resolves immediately if already ready, resolves on timeout, rejects
+  // only on explicit error.
+  const waitForAudioReady = (audioEl, timeoutMs = 12000) => new Promise((resolve, reject) => {
     if (!audioEl) return reject(new Error('no audio element'));
-    if (audioEl.readyState >= 3 /* HAVE_FUTURE_DATA */) return resolve();
+    if (audioEl.readyState >= 2 /* HAVE_CURRENT_DATA */) return resolve();
+    if (audioEl.error) return reject(new Error(audioEl.error.message || 'audio element error'));
+
     const onReady = () => { cleanup(); resolve(); };
-    const onErr   = () => { cleanup(); reject(new Error('audio load failed')); };
+    const onErr   = () => { cleanup(); reject(new Error(audioEl.error?.message || 'audio load failed')); };
     const cleanup = () => {
       audioEl.removeEventListener('canplaythrough', onReady);
-      audioEl.removeEventListener('canplay', onReady);
-      audioEl.removeEventListener('error', onErr);
+      audioEl.removeEventListener('canplay',        onReady);
+      audioEl.removeEventListener('error',          onErr);
       clearTimeout(timer);
     };
     audioEl.addEventListener('canplaythrough', onReady, { once: true });
     audioEl.addEventListener('canplay',        onReady, { once: true });
     audioEl.addEventListener('error',          onErr,   { once: true });
     const timer = setTimeout(() => { cleanup(); resolve(); }, timeoutMs);
-    try { audioEl.load(); } catch {} // kick off the fetch
+    // Do NOT call load() here — `src` + `preload="auto"` already starts
+    // the fetch. Calling load() resets readyState and races with canplay.
   });
 
   const updateVisualizer = useCallback(() => {
@@ -518,7 +531,7 @@ export default function DistillationLab() {
     <div id="distillation-matrix"
          className="min-h-screen w-full flex items-center justify-center p-4 font-sans bg-[#050505] selection:bg-purple-500/30">
 
-      <audio ref={audioRef} src={localAudioUrl} crossOrigin="anonymous"
+      <audio ref={audioRef} src={localAudioUrl}
              onEnded={() => { setActivePlay(null); stopVisualizer(); }} />
 
       {/* ── hidden per-stem <audio> elements ─────────────────── */}
@@ -528,8 +541,8 @@ export default function DistillationLab() {
             key={s.url}
             ref={el => { if (el) stemAudioRefs.current[s.url] = el; }}
             src={s.url}
-            crossOrigin="anonymous"
             preload="auto"
+            onError={() => setError(`Could not load stem: ${s.name}`)}
             onEnded={() => { if (activePlay === s.url) { setActivePlay(null); stopVisualizer(); } }}
           />
         ))}

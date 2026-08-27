@@ -101,20 +101,23 @@ export const onRequestGet = async ({ request, env, params }) => {
       if (!target) return json({ success: false, data: { message: 'url missing' } }, 400);
       if (!/^https?:\/\//i.test(target)) return json({ success: false, data: { message: 'url must be http(s)' } }, 400);
 
-      const upstream = await fetch(target);
+      const upstream = await fetch(target, { redirect: 'follow' });
       if (!upstream.ok) {
         return json({ success: false, data: { message: `upstream ${upstream.status}` } }, upstream.status);
       }
+      // Buffer the whole body — for stem audio (a few MB) this is fine,
+      // and it dodges any ReadableStream-pass-through quirks in Workers.
+      const body = await upstream.arrayBuffer();
       const headers = new Headers(CORS);
       const ct = upstream.headers.get('content-type') || 'application/octet-stream';
       headers.set('Content-Type', ct);
-      const cl = upstream.headers.get('content-length');
-      if (cl) headers.set('Content-Length', cl);
+      headers.set('Content-Length', String(body.byteLength));
+      headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
       if (name) headers.set('Content-Disposition', `attachment; filename="${String(name).replace(/"/g, '')}"`);
       // NB: we don't advertise Accept-Ranges because we don't implement
       // partial responses. Advertising it causes browsers to issue range
       // requests, which would fail.
-      return new Response(upstream.body, { status: 200, headers });
+      return new Response(body, { status: 200, headers });
     } catch (e) {
       return json({ success: false, data: { message: e.message } }, 500);
     }
